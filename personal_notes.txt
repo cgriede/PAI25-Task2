@@ -7,13 +7,15 @@ What I learned:
 -using full swag via the max rank matrix only focuses on the last K epochs,
 whilst the diagonal works over all training epochs
 
+-swag runs "independently" of the neural network training, first I thought it was integrated
+
 What I still do not understand:
 -why does it work, the math checks out but the understanding is not there
 (I would not be able to come up with something like this but is nice to have in my skillset)
 
 Remarks / Feedback:
--small detail: could include runner_win.sh and runner_unix.sh instead of providing different command
 -the workflow and learning process is very nicely structured, TODO1 leads you through the structure and TODO2 really leads you to study the paper
   and understand the workflow / process
   -also it is very possible to improve unlike other machine learning classes where you spend so much time on data cleaning and feature
   selection and model selection but you have no confidence if any of your processes really work
+  -it would have been nice to know these classes are the ones you are predicting (not clearly stated)

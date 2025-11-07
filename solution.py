@@ -75,7 +75,8 @@ def main():
         train_xs=training_dataset.tensors[0],
         model_dir=model_location,
         #NOTE (set to 1 for fast debug)
-        swag_training_epochs=1,
+        swag_training_epochs=2,
+        num_bma_samples=2,
     )
     swag_inference.train_model(training_loader)
     swag_inference.run_calibration(validation_dataset)
@@ -166,13 +167,13 @@ class SWAInferenceHandler(object):
         # Full SWAG
         # TODO(2): create attributes for SWAG-full
         #  Hint: check collections.deque
+        self.deviation_matrix = {name: collections.deque(maxlen=self.max_rank_deviation_matrix) for name in self._create_weight_copy()}
 
         # Calibration, prediction, and other attributes
         # TODO(2): create additional attributes, e.g., for calibration
         self._calibration_threshold = None  # this is an example, feel free to be creative
-        self.deviation_matrix = {name: collections.deque(maxlen=self.max_rank_deviation_matrix) for name in self._create_weight_copy()}
         self.current_weights = self._create_weight_copy()
-        self.low_rank_prefactor = 1 / np.sqrt(2*(self.max_rank_deviation_matrix-1))
+        self.low_rank_prefactor = 1 / np.sqrt(2*(self.max_rank_deviation_matrix - 1))
 
     def update_swag_statistics(self) -> None:
         """
@@ -183,18 +184,20 @@ class SWAInferenceHandler(object):
         copied_params = {name: param.detach() for name, param in self.network.named_parameters()}
 
         # SWAG-diagonal
-        if self.inference_mode == InferenceMode.SWAG_DIAGONAL:
-            for name, param in copied_params.items():
-                # TODO(1): update SWAG-diagonal attributes for weight `name` using `copied_params` and `param`
-                self.sum_weights[name] += param
-                self.sum_sq_weights[name] += param**2
+        for name, param in copied_params.items():
+            # TODO(1): update SWAG-diagonal attributes for weight `name` using `copied_params` and `param`
+            self.sum_weights[name] += param
+            self.sum_sq_weights[name] += param**2
 
         # Full SWAG
         # TODO(2): update full SWAG attributes for weight `name` using `copied_params` and `param`
         if self.inference_mode == InferenceMode.SWAG_FULL:
             for name, param in copied_params.items():
-                self.current_weights[name] = param
-                self.sum_weights[name] += param
+                # Compute deviation using the current SWA mean (from previous snapshots)
+                if self.num_snapshots > 0:  # Only compute deviation if we have a prior mean
+                    current_mean = self.sum_weights[name] / self.num_snapshots
+                    deviation = param - current_mean
+                    self.deviation_matrix[name].append(deviation)
 
     def fit_swag_model(self, loader: torch.utils.data.DataLoader) -> None:
         """
@@ -358,10 +361,13 @@ class SWAInferenceHandler(object):
             if self.inference_mode == InferenceMode.SWAG_FULL:
                 K_actual = len(self.deviation_matrix[name])  # Use actual deque size
                 if K_actual > 0:  # Ensure at least one deviation
-                    D = torch.stack(list(self.deviation_matrix[name]), dim=0)  # Shape: (K_actual, param.numel())
-                    z_lr = torch.randn(K_actual)  # Shape: (K_actual,) — matches D's rows
-                    
-                    # Compute low-rank term: D.t() @ z_lr
+                    # Stack deviations into a 2D matrix where each row is a flattened deviation vector
+                    # Each deque entry may have the original parameter shape (e.g., conv weights -> 4D),
+                    # so flatten before stacking to obtain shape (K_actual, param.numel()).
+                    D = torch.stack([d.view(-1) for d in list(self.deviation_matrix[name])], dim=0)
+                    # Ensure random vector has the same device and dtype as D
+                    z_lr = torch.randn(K_actual, device=D.device, dtype=D.dtype)
+                    # Compute low-rank term: (numel, K_actual) @ (K_actual,) -> (numel,)
                     lr_product = self.low_rank_prefactor * (D.t() @ z_lr).view(param.size())
                     
                     assert lr_product.size() == param.size()
