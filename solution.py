@@ -15,7 +15,7 @@ from matplotlib import pyplot as plt
 
 from util import paint_reliability_diagram, compute_cost, seed_setup, calculate_calibration_curve
 
-ENABLE_EXTENDED_ANALYSIS = False
+ENABLE_EXTENDED_ANALYSIS = True
 """
 Set `ENABLE_EXTENDED_ANALYSIS` to `True` in order to generate additional plots on validation data.
 """
@@ -31,13 +31,15 @@ Note that MAP inference can take a long time.
 
 
 def main():
-    raise RuntimeError(
-        "This main() method is for illustrative purposes only"
-        " and will NEVER be called when running your solution to generate your submission file!\n"
-        "The checker always directly interacts with your SWAInferenceHandler class and run_evaluation method.\n"
-        "You can remove this exception for local testing, but be aware that any changes to the main() method"
-        " are ignored when generating your submission file."
-    )
+
+    if False:
+        raise RuntimeError(
+            "This main() method is for illustrative purposes only"
+            " and will NEVER be called when running your solution to generate your submission file!\n"
+            "The checker always directly interacts with your SWAInferenceHandler class and run_evaluation method.\n"
+            "You can remove this exception for local testing, but be aware that any changes to the main() method"
+            " are ignored when generating your submission file."
+        )
 
     data_location = pathlib.Path.cwd()
     model_location = pathlib.Path.cwd()
@@ -72,6 +74,8 @@ def main():
     swag_inference = SWAInferenceHandler(
         train_xs=training_dataset.tensors[0],
         model_dir=model_location,
+        #NOTE (set to 1 for fast debug)
+        swag_training_epochs=1,
     )
     swag_inference.train_model(training_loader)
     swag_inference.run_calibration(validation_dataset)
@@ -113,7 +117,7 @@ class SWAInferenceHandler(object):
         model_dir: pathlib.Path,
         # TODO(1): change inference_mode to InferenceMode.SWAG_DIAGONAL
         # TODO(2): change inference_mode to InferenceMode.SWAG_FULL
-        inference_mode: InferenceMode = InferenceMode.MAP,
+        inference_mode: InferenceMode = InferenceMode.SWAG_FULL,
         # TODO(2): optionally add/tweak hyperparameters
         swag_training_epochs: int = 30,
         swag_lr: float = 0.045,
@@ -138,6 +142,7 @@ class SWAInferenceHandler(object):
         self.swag_lr = swag_lr
         self.swag_update_interval = swag_update_interval
         self.max_rank_deviation_matrix = max_rank_deviation_matrix
+        assert (self.max_rank_deviation_matrix >= 2), "max_rank_deviation_matrix must be at least 2"
         self.num_bma_samples = num_bma_samples
 
         # Network used to perform SWAG.
@@ -153,6 +158,10 @@ class SWAInferenceHandler(object):
         #  as a dictionary that maps from weight name to values.
         #  Hint: you never need to consider the full vector of weights,
         #  but can always act on per-layer weights (in the format that _create_weight_copy() returns)
+        #---------------------------------------------------------------------------------------
+        self.num_snapshots = 0 
+        self.sum_weights = self._create_weight_copy()  #dictionary mapping name to weight tensor (initialized to zero)
+        self.sum_sq_weights = self._create_weight_copy() #dictionary mapping name to weight tensor (initialized to zero)
 
         # Full SWAG
         # TODO(2): create attributes for SWAG-full
@@ -161,6 +170,9 @@ class SWAInferenceHandler(object):
         # Calibration, prediction, and other attributes
         # TODO(2): create additional attributes, e.g., for calibration
         self._calibration_threshold = None  # this is an example, feel free to be creative
+        self.deviation_matrix = {name: collections.deque(maxlen=self.max_rank_deviation_matrix) for name in self._create_weight_copy()}
+        self.current_weights = self._create_weight_copy()
+        self.low_rank_prefactor = 1 / np.sqrt(2*(self.max_rank_deviation_matrix-1))
 
     def update_swag_statistics(self) -> None:
         """
@@ -171,14 +183,18 @@ class SWAInferenceHandler(object):
         copied_params = {name: param.detach() for name, param in self.network.named_parameters()}
 
         # SWAG-diagonal
-        for name, param in copied_params.items():
-            # TODO(1): update SWAG-diagonal attributes for weight `name` using `copied_params` and `param`
-            raise NotImplementedError("Update SWAG-diagonal statistics")
+        if self.inference_mode == InferenceMode.SWAG_DIAGONAL:
+            for name, param in copied_params.items():
+                # TODO(1): update SWAG-diagonal attributes for weight `name` using `copied_params` and `param`
+                self.sum_weights[name] += param
+                self.sum_sq_weights[name] += param**2
 
         # Full SWAG
+        # TODO(2): update full SWAG attributes for weight `name` using `copied_params` and `param`
         if self.inference_mode == InferenceMode.SWAG_FULL:
-            # TODO(2): update full SWAG attributes for weight `name` using `copied_params` and `param`
-            raise NotImplementedError("Update full SWAG statistics")
+            for name, param in copied_params.items():
+                self.current_weights[name] = param
+                self.sum_weights[name] += param
 
     def fit_swag_model(self, loader: torch.utils.data.DataLoader) -> None:
         """
@@ -209,7 +225,7 @@ class SWAInferenceHandler(object):
         )
 
         # TODO(1): Perform initialization for SWAG fitting
-        raise NotImplementedError("Initialize SWAG fitting")
+        self.num_snapshots = 0
 
         self.network.train()
         with tqdm.trange(self.swag_training_epochs, desc="Running gradient descent for SWA") as pbar:
@@ -241,7 +257,9 @@ class SWAInferenceHandler(object):
                     pbar.set_postfix(progress_dict)
 
                 # TODO(1): Implement periodic SWAG updates using the attributes defined in __init__
-                raise NotImplementedError("Periodically update SWAG statistics")
+                if (epoch + 1) % self.swag_update_interval == 0:
+                    self.update_swag_statistics()
+                    self.num_snapshots += 1
 
     def run_calibration(self, validation_data: torch.utils.data.Dataset) -> None:
         """
@@ -255,7 +273,7 @@ class SWAInferenceHandler(object):
             return
 
         # TODO(1): pick a prediction threshold, either constant or adaptive.
-        self._calibration_threshold = 2.0 / 3.0
+        self._calibration_threshold = 0.5
 
         # TODO(2): perform additional calibration if desired.
         #  Feel free to remove or change the prediction threshold.
@@ -283,11 +301,20 @@ class SWAInferenceHandler(object):
         model_predictions = []
         for _ in tqdm.trange(self.num_bma_samples, desc="Performing Bayesian model averaging"):
             # TODO(1): Sample new parameters for self.network from the SWAG approximate posterior
-            raise NotImplementedError("Sample network parameters")
+            self.sample_parameters()
 
             # TODO(1): Perform inference for all samples in `loader` using current model sample,
             #  and add the predictions to model_predictions
-            raise NotImplementedError("Perform inference using current model")
+            batch_predictions = []
+            for (batch_images,) in loader:
+                with torch.no_grad():
+                    #forward pass
+                    preds = self.network(batch_images)
+                    #apply softmax to get probabilities
+                    probs = torch.softmax(preds, dim=-1)
+                    batch_predictions.append(probs)
+            sample_predictions = torch.cat(batch_predictions, dim=0)  # N x C
+            model_predictions.append(sample_predictions)
 
         assert len(model_predictions) == self.num_bma_samples
         assert all(
@@ -298,8 +325,9 @@ class SWAInferenceHandler(object):
         )
 
         # TODO(1): Average predictions from different model samples into bma_probabilities
-        raise NotImplementedError("Aggregate predictions from model samples")
-        bma_probabilities = ...
+        
+        all_predictions = torch.stack(model_predictions, dim=0)  # S x N x C
+        bma_probabilities = all_predictions.mean(dim=0)
 
         assert bma_probabilities.dim() == 2 and bma_probabilities.size(1) == 6  # N x C
         return bma_probabilities
@@ -316,26 +344,42 @@ class SWAInferenceHandler(object):
             # SWAG-diagonal part
             z_diag = torch.randn(param.size())
             # TODO(1): Sample parameter values for SWAG-diagonal
-            raise NotImplementedError("Sample parameter for SWAG-diagonal")
-            mean_weights = ...
-            std_weights = ...
-            assert mean_weights.size() == param.size() and std_weights.size() == param.size()
+            mean_weights = self.sum_weights[name] / self.num_snapshots
+            second_moment = self.sum_sq_weights[name] / self.num_snapshots
+            covariance = torch.clamp(second_moment - mean_weights**2, min=1e-30)
+            std_weights = torch.sqrt(covariance)
 
-            # Diagonal part
-            sampled_weight = mean_weights + std_weights * z_diag
+            assert mean_weights.size() == param.size() and std_weights.size() == param.size()
+            if self.inference_mode == InferenceMode.SWAG_DIAGONAL:
+                # Diagonal part
+                sampled_weight = mean_weights + std_weights * z_diag
 
             # Full SWAG part
             if self.inference_mode == InferenceMode.SWAG_FULL:
-                # TODO(2): Sample parameter values for full SWAG
-                raise NotImplementedError("Sample parameter for full SWAG")
-                sampled_weight += ...
+                K_actual = len(self.deviation_matrix[name])  # Use actual deque size
+                if K_actual > 0:  # Ensure at least one deviation
+                    D = torch.stack(list(self.deviation_matrix[name]), dim=0)  # Shape: (K_actual, param.numel())
+                    z_lr = torch.randn(K_actual)  # Shape: (K_actual,) — matches D's rows
+                    
+                    # Compute low-rank term: D.t() @ z_lr
+                    lr_product = self.low_rank_prefactor * (D.t() @ z_lr).view(param.size())
+                    
+                    assert lr_product.size() == param.size()
+                    
+                    sampled_weight = (mean_weights
+                                    + 1/math.sqrt(2) * std_weights * z_diag
+                                    + lr_product)
+                else:
+                    # Fallback to diagonal if no deviations are stored
+                    sampled_weight = mean_weights + std_weights * z_diag
+
 
             # Modify weight value in-place; directly changing self.network
             param.data = sampled_weight
 
         # TODO(1): Don't forget to update batch normalization statistics using self._update_batchnorm_statistics()
         #  in the appropriate place!
-        raise NotImplementedError("Update batch normalization statistics for newly sampled network")
+        self._update_batchnorm_statistics()
 
     def label_prediction(self, predicted_probabilities: torch.Tensor) -> torch.Tensor:
         """
@@ -575,6 +619,7 @@ class SWAGScheduler(torch.optim.lr_scheduler.LRScheduler):
         This method should return a single float: the new learning rate.
         """
         # TODO(2): Implement a custom schedule if desired
+        #this is done in the paper
         return previous_lr
 
     # TODO(2): Add and store additional arguments if you decide to implement a custom scheduler
