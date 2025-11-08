@@ -75,8 +75,8 @@ def main():
         train_xs=training_dataset.tensors[0],
         model_dir=model_location,
         #NOTE (set to 1 for fast debug)
-        swag_training_epochs=4,
-        num_bma_samples=4,
+        swag_training_epochs=2,
+        num_bma_samples=2,
     )
     swag_inference.train_model(training_loader)
     swag_inference.run_calibration(validation_dataset)
@@ -129,10 +129,10 @@ class SWAInferenceHandler(object):
         inference_mode: InferenceMode = InferenceMode.SWAG_FULL,
         # TODO(2): optionally add/tweak hyperparameters
         swag_training_epochs: int = 30,
-        swag_lr: float = 0.07,
+        swag_lr: float = 0.05,
         swag_update_interval: int = 1,
         max_rank_deviation_matrix: int = 15,
-        num_bma_samples: int = 30,
+        num_bma_samples: int = 50,
         min_lr_factor: float = 0.1,
     ):
         """
@@ -184,7 +184,6 @@ class SWAInferenceHandler(object):
         self._calibration_threshold = None
         self._temperature = 1.0
         self.current_weights = self._create_weight_copy()
-        self.low_rank_prefactor = 1 / np.sqrt(2*(self.max_rank_deviation_matrix - 1))
 
     def update_swag_statistics(self) -> None:
         """
@@ -288,59 +287,32 @@ class SWAInferenceHandler(object):
         print("Plotting SWAG training loss curve...")
         plot_loss_curve(training_history, title="SWAG Training Loss Curve", path="swag_training_loss_curve.png")
 
-    def run_calibration(self, validation_data: torch.utils.data.Dataset) -> None:
-        """
-        Calibrate your predictions using a small validation set.
-        validation_data contains well-defined and ambiguous samples,
-        where you can identify the latter by having label -1.
-        """
-        if self.inference_mode == InferenceMode.MAP:
-            # In MAP mode, simply predict argmax and do nothing else
-            self._calibration_threshold = 0.0
-            self._temperature = 1.0
-            return
-
-        # TODO(2): pick a adaptive prediction threshold
-        # Use margin-based confidence: find threshold that minimizes cost on validation
-        val_images, val_snow_labels, val_cloud_labels, val_labels = validation_data.tensors
-        assert val_images.size() == (140, 3, 60, 60)  # N x C x H x W
-        assert val_labels.size() == (140,)
-        assert val_snow_labels.size() == (140,)
-        assert val_cloud_labels.size() == (140,)
-        
-        # Get predictions on validation set
-        predicted_probabilities = self.predict_probs(val_images)
-        confidence_scores = self._compute_confidence_score(predicted_probabilities)
-        predicted_classes = torch.argmax(predicted_probabilities, dim=-1)
-        
-        # Filter non-ambiguous samples
-        non_ambiguous_mask = val_labels != -1
-        
-        # Grid search for best threshold using margin-based confidence
-        thresholds = torch.linspace(0.0, 1.0, 100)
+    def run_calibration(self, validation_dataset: torch.utils.data.Dataset) -> None:
+        images, _, _, labels = validation_dataset.tensors
         best_cost = float('inf')
-        best_threshold = 0.5
-        
-        for threshold in thresholds:
-            # Apply threshold to predictions
-            thresholded_preds = torch.where(
-                confidence_scores >= threshold,
-                predicted_classes,
-                -1 * torch.ones_like(predicted_classes)
-            )
-            
-            # Compute cost on validation set
-            cost = compute_cost(thresholded_preds, val_labels).item()
-            
-            if cost < best_cost:
-                best_cost = cost
-                best_threshold = threshold.item()
-        
-        self._calibration_threshold = best_threshold
-        print(f"Selected margin-based threshold: {self._calibration_threshold:.4f} with validation cost: {best_cost:.4f}")
+        best_temp = 1.0
+        best_thresh = 0.0
+        temps = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]  # Grid search; focus >1 for overconfidence
 
-        # TODO(2): perform additional calibration if desired.
-        #  Feel free to remove or change the prediction threshold.
+        for temp in temps:
+            self._temperature = temp
+            all_pred_probs = self.predict_probs(images)
+            max_probs, argmax_preds = torch.max(all_pred_probs, dim=-1)
+            threshold_values = [0.0] + list(torch.unique(max_probs).sort()[0].cpu().numpy())
+            costs = []
+            for thresh in threshold_values:
+                preds = torch.where(max_probs <= thresh, torch.tensor(-1, device=max_probs.device), argmax_preds)
+                cost = compute_cost(preds, labels)
+                costs.append(cost.item())
+            min_cost = min(costs)
+            if min_cost < best_cost:
+                best_cost = min_cost
+                best_temp = temp
+                best_thresh = threshold_values[costs.index(min_cost)]
+
+        self._temperature = best_temp
+        self._calibration_threshold = best_thresh
+        print(f"Calibrated temp: {best_temp}, thresh: {best_thresh}, val cost: {best_cost}")
 
     def _compute_confidence_score(self, predicted_probabilities: torch.Tensor) -> torch.Tensor:
         """
@@ -351,33 +323,9 @@ class SWAInferenceHandler(object):
         margin = top2_probs[:, 0] - top2_probs[:, 1]  # Larger margin = more confident
         return margin
 
-    def label_prediction(self, predicted_probabilities: torch.Tensor) -> torch.Tensor:
-        """
-        Predict labels in {0, 1, 2, 3, 4, 5} or "don't know" as -1
-        based on your model's predicted probabilities.
-        The parameter predicted_probabilities is an Nx6 tensor containing predicted probabilities
-        as returned by predict_probs(...).
-        The output should be a N-dimensional long tensor, containing values in {-1, 0, 1, 2, 3, 4, 5}.
-        """
-
-        # label_probabilities contains the per-row maximum values in predicted_probabilities,
-        # max_likelihood_labels the corresponding column index (equivalent to class).
-        label_probabilities, max_likelihood_labels = torch.max(predicted_probabilities, dim=-1)
-        num_samples, num_classes = predicted_probabilities.size()
-        assert label_probabilities.size() == (num_samples,) and max_likelihood_labels.size() == (num_samples,)
-
-        # A model without uncertainty awareness might simply predict the most likely label per sample:
-        # return max_likelihood_labels
-
-        # Use margin-based confidence: larger margin between top-2 probabilities = more confident
-        # TODO(2): implement a different decision rule if desired
-        confidence_score = self._compute_confidence_score(predicted_probabilities)
-        
-        return torch.where(
-            confidence_score >= self._calibration_threshold,
-            max_likelihood_labels,
-            torch.ones_like(max_likelihood_labels) * -1,
-        )
+    def label_prediction(self, pred_probabilities: torch.Tensor) -> torch.Tensor:
+        max_probs, argmax_preds = torch.max(pred_probabilities, dim=-1)
+        return torch.where(max_probs <= self._calibration_threshold, torch.tensor(-1, device=argmax_preds.device, dtype=argmax_preds.dtype), argmax_preds)
 
     def predict_probabilities_swag(self, loader: torch.utils.data.DataLoader) -> torch.Tensor:
         """
@@ -398,6 +346,7 @@ class SWAInferenceHandler(object):
         for _ in tqdm.trange(self.num_bma_samples, desc="Performing Bayesian model averaging"):
             # TODO(1): Sample new parameters for self.network from the SWAG approximate posterior
             self.sample_parameters()
+            self._update_batchnorm_statistics()
 
             # TODO(1): Perform inference for all samples in `loader` using current model sample,
             #  and add the predictions to model_predictions
@@ -461,7 +410,8 @@ class SWAInferenceHandler(object):
                     # Ensure random vector has the same device and dtype as D
                     z_lr = torch.randn(K_actual, device=D.device, dtype=D.dtype)
                     # Compute low-rank term: (numel, K_actual) @ (K_actual,) -> (numel,)
-                    lr_product = self.low_rank_prefactor * (D.t() @ z_lr).view(param.size())
+                    low_rank_prefactor = 1 / np.sqrt(2*(K_actual - 1))
+                    lr_product = low_rank_prefactor * (D.t() @ z_lr).view(param.size())
                     
                     assert lr_product.size() == param.size()
                     
@@ -476,10 +426,9 @@ class SWAInferenceHandler(object):
             # Modify weight value in-place; directly changing self.network
             param.data = sampled_weight
 
-        # TODO(1): Don't forget to update batch normalization statistics using self._update_batchnorm_statistics()
+        # TODO(x): Don't forget to update batch normalization statistics using self._update_batchnorm_statistics()
         #  in the appropriate place!
-        self._update_batchnorm_statistics()
-
+        
 
 
     def _create_weight_copy(self) -> typing.Dict[str, torch.Tensor]:
