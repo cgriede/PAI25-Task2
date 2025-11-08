@@ -75,8 +75,8 @@ def main():
         train_xs=training_dataset.tensors[0],
         model_dir=model_location,
         #NOTE (set to 1 for fast debug)
-        swag_training_epochs=10,
-        num_bma_samples=10,
+        swag_training_epochs=4,
+        num_bma_samples=4,
     )
     swag_inference.train_model(training_loader)
     swag_inference.run_calibration(validation_dataset)
@@ -180,6 +180,7 @@ class SWAInferenceHandler(object):
         # Calibration, prediction, and other attributes
         # TODO(x): create additional attributes, e.g., for calibration
         self._calibration_threshold = None
+        self._temperature = 1.0
         self.current_weights = self._create_weight_copy()
         self.low_rank_prefactor = 1 / np.sqrt(2*(self.max_rank_deviation_matrix - 1))
 
@@ -280,6 +281,7 @@ class SWAInferenceHandler(object):
                 if (epoch + 1) % self.swag_update_interval == 0:
                     self.update_swag_statistics()
         #visualize the training behaviour
+        print("Plotting SWAG training loss curve...")
         plot_loss_curve(training_history, title="SWAG Training Loss Curve", path="swag_training_loss_curve.png")
 
     def run_calibration(self, validation_data: torch.utils.data.Dataset) -> None:
@@ -291,18 +293,50 @@ class SWAInferenceHandler(object):
         if self.inference_mode == InferenceMode.MAP:
             # In MAP mode, simply predict argmax and do nothing else
             self._calibration_threshold = 0.0
+            self._temperature = 1.0
             return
 
         # TODO(2): pick a adaptive prediction threshold
-        self._calibration_threshold = 0.22
-
-        # TODO(2): perform additional calibration if desired.
-        #  Feel free to remove or change the prediction threshold.
+        # Use margin-based confidence: find threshold that minimizes cost on validation
         val_images, val_snow_labels, val_cloud_labels, val_labels = validation_data.tensors
         assert val_images.size() == (140, 3, 60, 60)  # N x C x H x W
         assert val_labels.size() == (140,)
         assert val_snow_labels.size() == (140,)
         assert val_cloud_labels.size() == (140,)
+        
+        # Get predictions on validation set
+        predicted_probabilities = self.predict_probs(val_images)
+        confidence_scores = self._compute_confidence_score(predicted_probabilities)
+        predicted_classes = torch.argmax(predicted_probabilities, dim=-1)
+        
+        # Filter non-ambiguous samples
+        non_ambiguous_mask = val_labels != -1
+        
+        # Grid search for best threshold using margin-based confidence
+        thresholds = torch.linspace(0.0, 1.0, 100)
+        best_cost = float('inf')
+        best_threshold = 0.5
+        
+        for threshold in thresholds:
+            # Apply threshold to predictions
+            thresholded_preds = torch.where(
+                confidence_scores >= threshold,
+                predicted_classes,
+                -1 * torch.ones_like(predicted_classes)
+            )
+            
+            # Compute cost on validation set
+            cost = compute_cost(thresholded_preds, val_labels).item()
+            
+            if cost < best_cost:
+                best_cost = cost
+                best_threshold = threshold.item()
+        
+        self._calibration_threshold = best_threshold
+        print(f"Selected margin-based threshold: {self._calibration_threshold:.4f} with validation cost: {best_cost:.4f}")
+
+        # TODO(2): perform additional calibration if desired.
+        #  Feel free to remove or change the prediction threshold.
 
     def _compute_confidence_score(self, predicted_probabilities: torch.Tensor) -> torch.Tensor:
         """
