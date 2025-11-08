@@ -129,10 +129,11 @@ class SWAInferenceHandler(object):
         inference_mode: InferenceMode = InferenceMode.SWAG_FULL,
         # TODO(2): optionally add/tweak hyperparameters
         swag_training_epochs: int = 30,
-        swag_lr: float = 0.045,
+        swag_lr: float = 0.07,
         swag_update_interval: int = 1,
         max_rank_deviation_matrix: int = 15,
         num_bma_samples: int = 30,
+        min_lr_factor: float = 0.1,
     ):
         """
         :param train_xs: Training images (for storage only)
@@ -153,6 +154,7 @@ class SWAInferenceHandler(object):
         self.max_rank_deviation_matrix = max_rank_deviation_matrix
         assert (self.max_rank_deviation_matrix >= 2), "max_rank_deviation_matrix must be at least 2"
         self.num_bma_samples = num_bma_samples
+        self.min_lr_factor = min_lr_factor
 
         # Network used to perform SWAG.
         # Note that all operations in this class modify this network IN-PLACE!
@@ -231,11 +233,13 @@ class SWAInferenceHandler(object):
             reduction="mean",
         )
         # TODO(2): Update SWAGScheduler instantiation if you decided to implement a custom schedule.
-        #  By default, this scheduler just keeps the initial learning rate given to `optimizer`.
+        #  Use cosine restart schedule as in SWA/SWAG: each cycle explores wide region then contracts.
         lr_scheduler = SWAGScheduler(
             optimizer,
             epochs=self.swag_training_epochs,
             steps_per_epoch=len(loader),
+            cycle_length_epochs=10,  # one cosine cycle = 10 epochs
+            min_lr_factor=self.min_lr_factor,       # eta_min = initial_lr * min_lr_factor
         )
 
         # TODO(1): Perform initialization for SWAG fitting
@@ -690,8 +694,17 @@ class SWAGScheduler(torch.optim.lr_scheduler.LRScheduler):
         This method should return a single float: the new learning rate.
         """
         # TODO(2): Implement a custom schedule if desired
-        #this is done in the paper
-        return previous_lr
+        # Cosine annealing with restarts (SGDR style) as used for SWA/SWAG.
+        # Each cycle is `self.cycle_length_epochs` long and decays from max_lr to min_lr.
+        max_lr = self.initial_lr
+        min_lr = self.min_lr
+        cycle_len = float(self.cycle_length_epochs)
+        cycle_pos = (current_epoch % cycle_len) / cycle_len
+        if cycle_pos < 0.5:
+            lr = min_lr + 2 * (max_lr - min_lr) * cycle_pos
+        else:
+            lr = max_lr - 2 * (max_lr - min_lr) * (cycle_pos - 0.5)
+        return lr
 
     # TODO(2): Add and store additional arguments if you decide to implement a custom scheduler
     def __init__(
@@ -699,9 +712,14 @@ class SWAGScheduler(torch.optim.lr_scheduler.LRScheduler):
         optimizer: torch.optim.Optimizer,
         epochs: int,
         steps_per_epoch: int,
+        cycle_length_epochs: int = 10,
+        min_lr_factor: float = 0.1,
     ):
         self.epochs = epochs
         self.steps_per_epoch = steps_per_epoch
+        self.initial_lr = optimizer.param_groups[0]['lr']
+        self.cycle_length_epochs = cycle_length_epochs
+        self.min_lr = self.initial_lr * min_lr_factor
         super().__init__(optimizer, last_epoch=-1, verbose=False)
 
     def get_lr(self):
