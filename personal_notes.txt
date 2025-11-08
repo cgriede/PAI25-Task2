@@ -1,13 +1,15 @@
 What I learned:
 
--docker never used before but quite nice
+-docker: never used before but quite nice
 
--how deques work I did not know it before
+-how deques work (very useful for this running matrix)
 
 -using full swag via the max rank matrix only focuses on the last K epochs,
 whilst the diagonal works over all training epochs
 
 -swag runs "independently" of the neural network training, first I thought it was integrated
+
+-plots are really helpful, they helped me choose a "better" threshold quite easily
 
 What I still do not understand:
 -why does it work, the math checks out but the understanding is not there

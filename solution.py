@@ -13,7 +13,7 @@ import torch.utils.data
 import tqdm
 from matplotlib import pyplot as plt
 
-from util import paint_reliability_diagram, compute_cost, seed_setup, calculate_calibration_curve
+from util import paint_reliability_diagram, compute_cost, seed_setup, calculate_calibration_curve, plot_loss_curve
 
 ENABLE_EXTENDED_ANALYSIS = True
 """
@@ -75,8 +75,8 @@ def main():
         train_xs=training_dataset.tensors[0],
         model_dir=model_location,
         #NOTE (set to 1 for fast debug)
-        swag_training_epochs=2,
-        num_bma_samples=2,
+        swag_training_epochs=10,
+        num_bma_samples=10,
     )
     swag_inference.train_model(training_loader)
     swag_inference.run_calibration(validation_dataset)
@@ -116,8 +116,6 @@ class SWAInferenceHandler(object):
         self,
         train_xs: torch.Tensor,
         model_dir: pathlib.Path,
-        # TODO(1): change inference_mode to InferenceMode.SWAG_DIAGONAL
-        # TODO(2): change inference_mode to InferenceMode.SWAG_FULL
         inference_mode: InferenceMode = InferenceMode.SWAG_FULL,
         # TODO(2): optionally add/tweak hyperparameters
         swag_training_epochs: int = 30,
@@ -165,12 +163,12 @@ class SWAInferenceHandler(object):
         self.sum_sq_weights = self._create_weight_copy() #dictionary mapping name to weight tensor (initialized to zero)
 
         # Full SWAG
-        # TODO(2): create attributes for SWAG-full
+        # TODO(x): create attributes for SWAG-full
         #  Hint: check collections.deque
         self.deviation_matrix = {name: collections.deque(maxlen=self.max_rank_deviation_matrix) for name in self._create_weight_copy()}
 
         # Calibration, prediction, and other attributes
-        # TODO(2): create additional attributes, e.g., for calibration
+        # TODO(x): create additional attributes, e.g., for calibration
         self._calibration_threshold = None  # this is an example, feel free to be creative
         self.current_weights = self._create_weight_copy()
         self.low_rank_prefactor = 1 / np.sqrt(2*(self.max_rank_deviation_matrix - 1))
@@ -190,7 +188,7 @@ class SWAInferenceHandler(object):
             self.sum_sq_weights[name] += param**2
 
         # Full SWAG
-        # TODO(2): update full SWAG attributes for weight `name` using `copied_params` and `param`
+        # TODO(x): update full SWAG attributes for weight `name` using `copied_params` and `param`
         if self.inference_mode == InferenceMode.SWAG_FULL:
             for name, param in copied_params.items():
                 # Compute deviation using the current SWA mean (from previous snapshots)
@@ -231,6 +229,7 @@ class SWAInferenceHandler(object):
         self.num_snapshots = 0
 
         self.network.train()
+        plot_dict = {}
         with tqdm.trange(self.swag_training_epochs, desc="Running gradient descent for SWA") as pbar:
             progress_dict = {}
             for epoch in pbar:
@@ -263,6 +262,8 @@ class SWAInferenceHandler(object):
                 if (epoch + 1) % self.swag_update_interval == 0:
                     self.update_swag_statistics()
                     self.num_snapshots += 1
+        #visualize the training behaviour
+        plot_loss_curve(progress_dict, title="SWAG Training Loss Curve", path="swag_training_loss_curve.png")
 
     def run_calibration(self, validation_data: torch.utils.data.Dataset) -> None:
         """
@@ -275,8 +276,8 @@ class SWAInferenceHandler(object):
             self._calibration_threshold = 0.0
             return
 
-        # TODO(1): pick a prediction threshold, either constant or adaptive.
-        self._calibration_threshold = 0.5
+        # TODO(2): pick a adaptive prediction threshold
+        self._calibration_threshold = 0.22
 
         # TODO(2): perform additional calibration if desired.
         #  Feel free to remove or change the prediction threshold.
@@ -753,7 +754,6 @@ def run_evaluation(
                 )
         fig.suptitle("Least confident predictions", size=20)
         fig.savefig(output_location / "examples_least_confident.pdf")
-
 
 class CNN(torch.nn.Module):
     """

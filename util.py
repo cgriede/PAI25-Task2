@@ -6,6 +6,41 @@ import numpy as np
 import torch
 import torch.backends.cudnn
 
+def plot_loss_curve(training_progress: dict, title: str = "Training Loss Curve", path: str = "loss_curve.png") -> None:
+    """Plots the training loss and accuracy curves from the training progress dictionary."""
+    try:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # Extract data
+        epochs = list(training_progress.keys())
+        losses = [training_progress[epoch]["avg. epoch loss"] for epoch in epochs]
+        accuracies = [training_progress[epoch]["avg. epoch accuracy"] for epoch in epochs]
+        
+        # Plot loss
+        ax1.scatter(epochs, losses, alpha=0.6, label="Avg Loss")
+        ax1.plot(epochs, losses, alpha=0.3)
+        ax1.set_title("Training Loss")
+        ax1.set_xlabel("Epoch")
+        ax1.set_ylabel("Average Loss")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot accuracy
+        ax2.scatter(epochs, accuracies, alpha=0.6, color='green', label="Avg Accuracy")
+        ax2.plot(epochs, accuracies, alpha=0.3, color='green')
+        ax2.set_title("Training Accuracy")
+        ax2.set_xlabel("Epoch")
+        ax2.set_ylabel("Average Accuracy")
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        fig.suptitle(title)
+        fig.tight_layout()
+        fig.savefig(path)
+        plt.close(fig)
+    except Exception as e:
+        print(f"Could not plot loss curve: {e}")
+
 def compute_ece(predicted_probabilities: np.ndarray, labels: np.ndarray, n_bins: int = 30) -> float:
     """
     Computes the Expected Calibration Error (ECE).
