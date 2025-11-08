@@ -111,7 +111,17 @@ class SWAInferenceHandler(object):
     You can pass the baseline by only modifying methods marked with TODO.
     However, we encourage you to skim other methods in order to gain a better understanding of SWAG.
     """
-
+    defaults = {
+        "train_xs"                  : torch.Tensor,
+        "model_dir"                 : pathlib.Path,
+        "inference_mode"            : InferenceMode.SWAG_FULL,
+        "swag_training_epochs"      : 30,
+        "swag_lr"                   : 0.045,
+        "swag_update_interval"      : 1,
+        "max_rank_deviation_matrix" : 15,
+        "num_bma_samples"           : 30,
+    }
+    #these __init__ and methods get directly used by the checker
     def __init__(
         self,
         train_xs: torch.Tensor,
@@ -169,7 +179,7 @@ class SWAInferenceHandler(object):
 
         # Calibration, prediction, and other attributes
         # TODO(x): create additional attributes, e.g., for calibration
-        self._calibration_threshold = None  # this is an example, feel free to be creative
+        self._calibration_threshold = None
         self.current_weights = self._create_weight_copy()
         self.low_rank_prefactor = 1 / np.sqrt(2*(self.max_rank_deviation_matrix - 1))
 
@@ -181,21 +191,23 @@ class SWAInferenceHandler(object):
         # Create a copy of the current network weights
         copied_params = {name: param.detach() for name, param in self.network.named_parameters()}
 
-        # SWAG-diagonal
+        # SWAG-diagonal: update running sums FIRST
         for name, param in copied_params.items():
             # TODO(1): update SWAG-diagonal attributes for weight `name` using `copied_params` and `param`
             self.sum_weights[name] += param
             self.sum_sq_weights[name] += param**2
+        
+        # Increment snapshot counter BEFORE computing deviations
+        self.num_snapshots += 1
 
-        # Full SWAG
+        # Full SWAG: compute deviations using the updated mean (including current snapshot)
         # TODO(x): update full SWAG attributes for weight `name` using `copied_params` and `param`
         if self.inference_mode == InferenceMode.SWAG_FULL:
             for name, param in copied_params.items():
-                # Compute deviation using the current SWA mean (from previous snapshots)
-                if self.num_snapshots > 0:  # Only compute deviation if we have a prior mean
-                    current_mean = self.sum_weights[name] / self.num_snapshots
-                    deviation = param - current_mean
-                    self.deviation_matrix[name].append(deviation)
+                # Compute deviation using the updated SWA mean (including current snapshot)
+                current_mean = self.sum_weights[name] / self.num_snapshots
+                deviation = param - current_mean
+                self.deviation_matrix[name].append(deviation)
 
     def fit_swag_model(self, loader: torch.utils.data.DataLoader) -> None:
         """
@@ -229,7 +241,7 @@ class SWAInferenceHandler(object):
         self.num_snapshots = 0
 
         self.network.train()
-        plot_dict = {}
+        training_history = {}
         with tqdm.trange(self.swag_training_epochs, desc="Running gradient descent for SWA") as pbar:
             progress_dict = {}
             for epoch in pbar:
@@ -258,12 +270,17 @@ class SWAInferenceHandler(object):
                     progress_dict["avg. epoch accuracy"] = avg_accuracy
                     pbar.set_postfix(progress_dict)
 
+                # Store epoch statistics for plotting
+                training_history[epoch] = {
+                    "avg. epoch loss": avg_loss,
+                    "avg. epoch accuracy": avg_accuracy
+                }
+
                 # TODO(1): Implement periodic SWAG updates using the attributes defined in __init__
                 if (epoch + 1) % self.swag_update_interval == 0:
                     self.update_swag_statistics()
-                    self.num_snapshots += 1
         #visualize the training behaviour
-        plot_loss_curve(progress_dict, title="SWAG Training Loss Curve", path="swag_training_loss_curve.png")
+        plot_loss_curve(training_history, title="SWAG Training Loss Curve", path="swag_training_loss_curve.png")
 
     def run_calibration(self, validation_data: torch.utils.data.Dataset) -> None:
         """
@@ -286,6 +303,43 @@ class SWAInferenceHandler(object):
         assert val_labels.size() == (140,)
         assert val_snow_labels.size() == (140,)
         assert val_cloud_labels.size() == (140,)
+
+    def _compute_confidence_score(self, predicted_probabilities: torch.Tensor) -> torch.Tensor:
+        """
+        Compute confidence score using margin between top-2 probabilities.
+        Higher margin = more confident prediction.
+        """
+        top2_probs, _ = torch.topk(predicted_probabilities, k=2, dim=-1)
+        margin = top2_probs[:, 0] - top2_probs[:, 1]  # Larger margin = more confident
+        return margin
+
+    def label_prediction(self, predicted_probabilities: torch.Tensor) -> torch.Tensor:
+        """
+        Predict labels in {0, 1, 2, 3, 4, 5} or "don't know" as -1
+        based on your model's predicted probabilities.
+        The parameter predicted_probabilities is an Nx6 tensor containing predicted probabilities
+        as returned by predict_probs(...).
+        The output should be a N-dimensional long tensor, containing values in {-1, 0, 1, 2, 3, 4, 5}.
+        """
+
+        # label_probabilities contains the per-row maximum values in predicted_probabilities,
+        # max_likelihood_labels the corresponding column index (equivalent to class).
+        label_probabilities, max_likelihood_labels = torch.max(predicted_probabilities, dim=-1)
+        num_samples, num_classes = predicted_probabilities.size()
+        assert label_probabilities.size() == (num_samples,) and max_likelihood_labels.size() == (num_samples,)
+
+        # A model without uncertainty awareness might simply predict the most likely label per sample:
+        # return max_likelihood_labels
+
+        # Use margin-based confidence: larger margin between top-2 probabilities = more confident
+        # TODO(2): implement a different decision rule if desired
+        confidence_score = self._compute_confidence_score(predicted_probabilities)
+        
+        return torch.where(
+            confidence_score >= self._calibration_threshold,
+            max_likelihood_labels,
+            torch.ones_like(max_likelihood_labels) * -1,
+        )
 
     def predict_probabilities_swag(self, loader: torch.utils.data.DataLoader) -> torch.Tensor:
         """
@@ -388,31 +442,7 @@ class SWAInferenceHandler(object):
         #  in the appropriate place!
         self._update_batchnorm_statistics()
 
-    def label_prediction(self, predicted_probabilities: torch.Tensor) -> torch.Tensor:
-        """
-        Predict labels in {0, 1, 2, 3, 4, 5} or "don't know" as -1
-        based on your model's predicted probabilities.
-        The parameter predicted_probabilities is an Nx6 tensor containing predicted probabilities
-        as returned by predict_probs(...).
-        The output should be a N-dimensional long tensor, containing values in {-1, 0, 1, 2, 3, 4, 5}.
-        """
 
-        # label_probabilities contains the per-row maximum values in predicted_probabilities,
-        # max_likelihood_labels the corresponding column index (equivalent to class).
-        label_probabilities, max_likelihood_labels = torch.max(predicted_probabilities, dim=-1)
-        num_samples, num_classes = predicted_probabilities.size()
-        assert label_probabilities.size() == (num_samples,) and max_likelihood_labels.size() == (num_samples,)
-
-        # A model without uncertainty awareness might simply predict the most likely label per sample:
-        # return max_likelihood_labels
-
-        # A bit better: use a threshold to decide whether to return a label or "don't know" (label -1)
-        # TODO(2): implement a different decision rule if desired
-        return torch.where(
-            label_probabilities >= self._calibration_threshold,
-            max_likelihood_labels,
-            torch.ones_like(max_likelihood_labels) * -1,
-        )
 
     def _create_weight_copy(self) -> typing.Dict[str, torch.Tensor]:
         """Create an all-zero copy of the network weights as a dictionary that maps name -> weight"""
