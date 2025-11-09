@@ -310,11 +310,11 @@ class SWAInferenceHandler(object):
             thresh = torch.quantile(clear_conf, 0.15).item()  # ~0.65-0.70 typically
 
             # No heavy temp scaling (SWAG is already calibrated per paper); light if overconfident
-            self._temperature = 1.3  # Fixed; or remove if ECE <0.08 on val
+            self._temperature = 3  # Fixed; or remove if ECE <0.08 on val
             self._calibration_threshold = thresh
 
             # Optional: Print for debug (remove before submit)
-            print(f"Robust calib: thresh={thresh:.4f} (10th %ile on {clear_mask.sum().item()} clear samples)")
+            print(f"Robust calib: thresh={thresh:.4f} (15th %ile on {clear_mask.sum().item()} clear samples)")
         else:
             self._calibration_threshold = 0.0  # no abstain
 
