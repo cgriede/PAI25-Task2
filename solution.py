@@ -309,7 +309,7 @@ class SWAInferenceHandler(object):
             clear_conf = max_probs[clear_mask]
 
             # Set thresh to 10th percentile of confidence on clear samples (conservative rejection)
-            thresh = torch.quantile(clear_conf, 0.2).item()  # ~0.65-0.70 typically
+            thresh = torch.quantile(clear_conf, 0.3).item()  # ~0.65-0.70 typically
 
             # No heavy temp scaling (SWAG is already calibrated per paper); light if overconfident
             self._temperature = 1  # Fixed; or remove if ECE <0.08 on val
@@ -394,13 +394,13 @@ class SWAInferenceHandler(object):
             z_diag = torch.randn(param.size())
             # TODO(1): Sample parameter values for SWAG-diagonal
             mean_weights = self.sum_weights[name] / self.num_snapshots
-            print("mean_weights", mean_weights.size())
+            #print("mean_weights", mean_weights.size())
             second_moment = self.sum_sq_weights[name] / self.num_snapshots
-            print("second_moment", second_moment.size())
+            #print("second_moment", second_moment.size())
             covariance = torch.clamp(second_moment - mean_weights**2, min=1e-30)
-            print("covariance", covariance.size())
+            #print("covariance", covariance.size())
             std_weights = torch.sqrt(covariance)
-            print("std_weights", std_weights.size())
+            #print("std_weights", std_weights.size())
 
             assert mean_weights.size() == param.size() and std_weights.size() == param.size()
             if self.inference_mode == InferenceMode.SWAG_DIAGONAL:
@@ -410,13 +410,13 @@ class SWAInferenceHandler(object):
             # Full SWAG part
             if self.inference_mode == InferenceMode.SWAG_FULL:
                 K_actual = len(self.deviation_matrix[name])  # Use actual deque size
-                print(K_actual)
+                #print(K_actual)
                 if K_actual > 0:  # Ensure at least one deviation
                     # Stack deviations into a 2D matrix where each row is a flattened deviation vector
                     # Each deque entry may have the original parameter shape (e.g., conv weights -> 4D),
                     # so flatten before stacking to obtain shape (K_actual, param.numel()).
                     D = torch.stack([d.view(-1) for d in list(self.deviation_matrix[name])], dim=0)
-                    print("D.size()", D.size())
+                    #print("D.size()", D.size())
                     # Ensure random vector has the same device and dtype as D
                     z_lr = torch.randn(K_actual, device=D.device, dtype=D.dtype)
                     print("z_lr",z_lr.size())
@@ -429,7 +429,7 @@ class SWAInferenceHandler(object):
                     sampled_weight = (mean_weights
                                     + 1/math.sqrt(2) * std_weights * z_diag
                                     + lr_product)
-                    print("sampled weight comps:",mean_weights,1/math.sqrt(2) * std_weights * z_diag,lr_product)
+                    #print("sampled weight comps:",mean_weights,1/math.sqrt(2) * std_weights * z_diag,lr_product)
                 else:
                     # Fallback to diagonal if no deviations are stored
                     sampled_weight = mean_weights + std_weights * z_diag
@@ -437,7 +437,7 @@ class SWAInferenceHandler(object):
 
             # Modify weight value in-place; directly changing self.network
             param.data = sampled_weight
-            print(f"Sampled parameter {name} with data {param.data}")
+            #print(f"Sampled parameter {name} with data {param.data}")
         
     def _create_weight_copy(self) -> typing.Dict[str, torch.Tensor]:
         """Create an all-zero copy of the network weights as a dictionary that maps name -> weight"""
