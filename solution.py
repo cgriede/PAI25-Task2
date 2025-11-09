@@ -29,66 +29,6 @@ this solution always performs MAP inference before running your SWAG implementat
 Note that MAP inference can take a long time.
 """
 
-
-def main():
-
-    if False:
-        raise RuntimeError(
-            "This main() method is for illustrative purposes only"
-            " and will NEVER be called when running your solution to generate your submission file!\n"
-            "The checker always directly interacts with your SWAInferenceHandler class and run_evaluation method.\n"
-            "You can remove this exception for local testing, but be aware that any changes to the main() method"
-            " are ignored when generating your submission file."
-        )
-
-    data_location = pathlib.Path.cwd()
-    model_location = pathlib.Path.cwd()
-    output_location = pathlib.Path.cwd()
-
-    # Load training data
-    training_images = torch.from_numpy(np.load(data_location / "train_xs.npz")["train_xs"])
-    training_metadata = np.load(data_location / "train_ys.npz")
-    training_labels = torch.from_numpy(training_metadata["train_ys"])
-    training_snow_labels = torch.from_numpy(training_metadata["train_is_snow"])
-    training_cloud_labels = torch.from_numpy(training_metadata["train_is_cloud"])
-    training_dataset = torch.utils.data.TensorDataset(training_images, training_snow_labels, training_cloud_labels, training_labels)
-
-    # Load validation data
-    validation_images = torch.from_numpy(np.load(data_location / "val_xs.npz")["val_xs"])
-    validation_metadata = np.load(data_location / "val_ys.npz")
-    validation_labels = torch.from_numpy(validation_metadata["val_ys"])
-    validation_snow_labels = torch.from_numpy(validation_metadata["val_is_snow"])
-    validation_cloud_labels = torch.from_numpy(validation_metadata["val_is_cloud"])
-    validation_dataset = torch.utils.data.TensorDataset(validation_images, validation_snow_labels, validation_cloud_labels, validation_labels)
-
-    # Fix all randomness
-    seed_setup()
-
-    # Build and run the actual solution
-    training_loader = torch.utils.data.DataLoader(
-        training_dataset,
-        batch_size=16,
-        shuffle=True,
-        num_workers=0,
-    )
-    swag_inference = SWAInferenceHandler(
-        train_xs=training_dataset.tensors[0],
-        model_dir=model_location,
-        #NOTE (set to 1 for fast debug)
-        swag_training_epochs=2,
-        num_bma_samples=2,
-    )
-    swag_inference.train_model(training_loader)
-    swag_inference.run_calibration(validation_dataset)
-
-    # fork_rng ensures that the evaluation does not change the rng state.
-    # That way, you should get exactly the same results even if you remove evaluation
-    # to save computational time when developing the task
-    # (as long as you ONLY use torch randomness, and not e.g. random or numpy.random).
-    with torch.random.fork_rng():
-        run_evaluation(swag_inference, validation_dataset, ENABLE_EXTENDED_ANALYSIS, output_location)
-
-
 class InferenceMode(enum.Enum):
     """
     Inference mode switch for your implementation.
@@ -111,16 +51,7 @@ class SWAInferenceHandler(object):
     You can pass the baseline by only modifying methods marked with TODO.
     However, we encourage you to skim other methods in order to gain a better understanding of SWAG.
     """
-    defaults = {
-        "train_xs"                  : torch.Tensor,
-        "model_dir"                 : pathlib.Path,
-        "inference_mode"            : InferenceMode.SWAG_FULL,
-        "swag_training_epochs"      : 30,
-        "swag_lr"                   : 0.045,
-        "swag_update_interval"      : 1,
-        "max_rank_deviation_matrix" : 15,
-        "num_bma_samples"           : 30,
-    }
+
     #these __init__ and methods get directly used by the checker
     def __init__(
         self,
@@ -128,15 +59,15 @@ class SWAInferenceHandler(object):
         model_dir: pathlib.Path,
         inference_mode: InferenceMode = InferenceMode.SWAG_FULL,
         # TODO(2): optionally add/tweak hyperparameters
-        swag_training_epochs: int = 30,
+        swag_training_epochs: int = 50,
         swag_lr: float = 0.055,
-        min_lr_factor: float = 0.82,
+        min_lr_factor: float = 0.75,
         swag_update_interval: int = 1,
-        max_rank_deviation_matrix: int = 30,
-        num_bma_samples: int = 40,
+        max_rank_deviation_matrix: int = 40,
+        num_bma_samples: int = 50,
         use_calibration:  bool = True,
-        thresh_quantile: float = 0.35,
-        calibration_temp: float = 1.0
+        thresh_quantile: float = 0.42,
+        calibration_temp: float = 1.1
     ):
         """
         :param train_xs: Training images (for storage only)
@@ -207,7 +138,6 @@ class SWAInferenceHandler(object):
         
         # Increment snapshot counter BEFORE computing deviations
         self.num_snapshots += 1
-        print("num_snapshots", self.num_snapshots)
 
         # Full SWAG: compute deviations using the updated mean (including current snapshot)
         # TODO(x): update full SWAG attributes for weight `name` using `copied_params` and `param`
@@ -215,7 +145,6 @@ class SWAInferenceHandler(object):
             for name, param in copied_params.items():
                 # Compute deviation using the updated SWA mean (including current snapshot)
                 current_mean = self.sum_weights[name] / self.num_snapshots
-                print(f"current_mean for {name}: {current_mean.size()}, data: {current_mean}")
                 deviation = param - current_mean
                 self.deviation_matrix[name].append(deviation)
 
@@ -396,13 +325,9 @@ class SWAInferenceHandler(object):
             z_diag = torch.randn(param.size())
             # TODO(1): Sample parameter values for SWAG-diagonal
             mean_weights = self.sum_weights[name] / self.num_snapshots
-            #print("mean_weights", mean_weights.size())
             second_moment = self.sum_sq_weights[name] / self.num_snapshots
-            #print("second_moment", second_moment.size())
             covariance = torch.clamp(second_moment - mean_weights**2, min=1e-30)
-            #print("covariance", covariance.size())
             std_weights = torch.sqrt(covariance)
-            #print("std_weights", std_weights.size())
 
             assert mean_weights.size() == param.size() and std_weights.size() == param.size()
             if self.inference_mode == InferenceMode.SWAG_DIAGONAL:
@@ -412,16 +337,13 @@ class SWAInferenceHandler(object):
             # Full SWAG part
             if self.inference_mode == InferenceMode.SWAG_FULL:
                 K_actual = len(self.deviation_matrix[name])  # Use actual deque size
-                #print(K_actual)
                 if K_actual > 0:  # Ensure at least one deviation
                     # Stack deviations into a 2D matrix where each row is a flattened deviation vector
                     # Each deque entry may have the original parameter shape (e.g., conv weights -> 4D),
                     # so flatten before stacking to obtain shape (K_actual, param.numel()).
                     D = torch.stack([d.view(-1) for d in list(self.deviation_matrix[name])], dim=0)
-                    #print("D.size()", D.size())
                     # Ensure random vector has the same device and dtype as D
                     z_lr = torch.randn(K_actual, device=D.device, dtype=D.dtype)
-                    #print("z_lr",z_lr.size())
                     # Compute low-rank term: (numel, K_actual) @ (K_actual,) -> (numel,)
                     low_rank_prefactor = 1 / np.sqrt(2*(K_actual - 1))
                     lr_product = low_rank_prefactor * (D.t() @ z_lr).view(param.size())
@@ -431,7 +353,6 @@ class SWAInferenceHandler(object):
                     sampled_weight = (mean_weights
                                     + 1/math.sqrt(2) * std_weights * z_diag
                                     + lr_product)
-                    #print("sampled weight comps:",mean_weights,1/math.sqrt(2) * std_weights * z_diag,lr_product)
                 else:
                     # Fallback to diagonal if no deviations are stored
                     sampled_weight = mean_weights + std_weights * z_diag
@@ -439,7 +360,6 @@ class SWAInferenceHandler(object):
 
             # Modify weight value in-place; directly changing self.network
             param.data = sampled_weight
-            #print(f"Sampled parameter {name} with data {param.data}")
         
     def _create_weight_copy(self) -> typing.Dict[str, torch.Tensor]:
         """Create an all-zero copy of the network weights as a dictionary that maps name -> weight"""
@@ -866,6 +786,76 @@ class CNN(torch.nn.Module):
 
         return log_softmax
 
+
+
+def main():
+
+    if False:
+        raise RuntimeError(
+            "This main() method is for illustrative purposes only"
+            " and will NEVER be called when running your solution to generate your submission file!\n"
+            "The checker always directly interacts with your SWAInferenceHandler class and run_evaluation method.\n"
+            "You can remove this exception for local testing, but be aware that any changes to the main() method"
+            " are ignored when generating your submission file."
+        )
+
+    data_location = pathlib.Path.cwd()
+    model_location = pathlib.Path.cwd()
+    output_location = pathlib.Path.cwd()
+
+    # Load training data
+    training_images = torch.from_numpy(np.load(data_location / "train_xs.npz")["train_xs"])
+    training_metadata = np.load(data_location / "train_ys.npz")
+    training_labels = torch.from_numpy(training_metadata["train_ys"])
+    training_snow_labels = torch.from_numpy(training_metadata["train_is_snow"])
+    training_cloud_labels = torch.from_numpy(training_metadata["train_is_cloud"])
+    training_dataset = torch.utils.data.TensorDataset(training_images, training_snow_labels, training_cloud_labels, training_labels)
+
+    # Load validation data
+    validation_images = torch.from_numpy(np.load(data_location / "val_xs.npz")["val_xs"])
+    validation_metadata = np.load(data_location / "val_ys.npz")
+    validation_labels = torch.from_numpy(validation_metadata["val_ys"])
+    validation_snow_labels = torch.from_numpy(validation_metadata["val_is_snow"])
+    validation_cloud_labels = torch.from_numpy(validation_metadata["val_is_cloud"])
+    validation_dataset = torch.utils.data.TensorDataset(validation_images, validation_snow_labels, validation_cloud_labels, validation_labels)
+
+    # Fix all randomness
+    seed_setup()
+
+    # Build and run the actual solution
+    training_loader = torch.utils.data.DataLoader(
+        training_dataset,
+        batch_size=16,
+        shuffle=True,
+        num_workers=0,
+    )
+    swag_inference = SWAInferenceHandler(
+        train_xs=training_dataset.tensors[0],
+        model_dir=model_location,
+        #NOTE (set to 1 for fast debug)
+        swag_training_epochs=2,
+        num_bma_samples=2,
+    )
+    swag_inference.train_model(training_loader)
+    swag_inference.run_calibration(validation_dataset)
+
+    # fork_rng ensures that the evaluation does not change the rng state.
+    # That way, you should get exactly the same results even if you remove evaluation
+    # to save computational time when developing the task
+    # (as long as you ONLY use torch randomness, and not e.g. random or numpy.random).
+    with torch.random.fork_rng():
+        run_evaluation(swag_inference, validation_dataset, ENABLE_EXTENDED_ANALYSIS, output_location)
+
+defaults = {
+        "train_xs"                  : torch.Tensor,
+        "model_dir"                 : pathlib.Path,
+        "inference_mode"            : InferenceMode.SWAG_FULL,
+        "swag_training_epochs"      : 30,
+        "swag_lr"                   : 0.045,
+        "swag_update_interval"      : 1,
+        "max_rank_deviation_matrix" : 15,
+        "num_bma_samples"           : 30,
+    }
 
 if __name__ == "__main__":
     main()
