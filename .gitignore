@@ -207,3 +207,4 @@ marimo/_lsp/
 __marimo__/
 
 .pdf
+swag_training_loss_curve.png
