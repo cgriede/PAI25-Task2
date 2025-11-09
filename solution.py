@@ -131,7 +131,7 @@ class SWAInferenceHandler(object):
         swag_training_epochs: int = 30,
         swag_lr: float = 0.05,
         swag_update_interval: int = 1,
-        max_rank_deviation_matrix: int = 15,
+        max_rank_deviation_matrix: int = 20,
         num_bma_samples: int = 50,
         min_lr_factor: float = 0.1,
         use_calibration:  bool = True,
@@ -307,10 +307,10 @@ class SWAInferenceHandler(object):
             clear_conf = max_probs[clear_mask]
 
             # Set thresh to 10th percentile of confidence on clear samples (conservative rejection)
-            thresh = torch.quantile(clear_conf, 0.10).item()  # ~0.65-0.70 typically
+            thresh = torch.quantile(clear_conf, 0.15).item()  # ~0.65-0.70 typically
 
             # No heavy temp scaling (SWAG is already calibrated per paper); light if overconfident
-            self._temperature = 1.2  # Fixed; or remove if ECE <0.08 on val
+            self._temperature = 1.3  # Fixed; or remove if ECE <0.08 on val
             self._calibration_threshold = thresh
 
             # Optional: Print for debug (remove before submit)
@@ -427,12 +427,7 @@ class SWAInferenceHandler(object):
 
             # Modify weight value in-place; directly changing self.network
             param.data = sampled_weight
-
-        # TODO(x): Don't forget to update batch normalization statistics using self._update_batchnorm_statistics()
-        #  in the appropriate place!
         
-
-
     def _create_weight_copy(self) -> typing.Dict[str, torch.Tensor]:
         """Create an all-zero copy of the network weights as a dictionary that maps name -> weight"""
         return {
