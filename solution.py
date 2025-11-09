@@ -294,9 +294,9 @@ class SWAInferenceHandler(object):
         best_thresh = 0.0
         temps = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]  # Grid search; focus >1 for overconfidence
 
+        all_pred_probs = self.predict_probs(images)
         for temp in temps:
             self._temperature = temp
-            all_pred_probs = self.predict_probs(images)
             max_probs, argmax_preds = torch.max(all_pred_probs, dim=-1)
             threshold_values = [0.0] + list(torch.unique(max_probs).sort()[0].cpu().numpy())
             costs = []
@@ -313,15 +313,6 @@ class SWAInferenceHandler(object):
         self._temperature = best_temp
         self._calibration_threshold = best_thresh
         print(f"Calibrated temp: {best_temp}, thresh: {best_thresh}, val cost: {best_cost}")
-
-    def _compute_confidence_score(self, predicted_probabilities: torch.Tensor) -> torch.Tensor:
-        """
-        Compute confidence score using margin between top-2 probabilities.
-        Higher margin = more confident prediction.
-        """
-        top2_probs, _ = torch.topk(predicted_probabilities, k=2, dim=-1)
-        margin = top2_probs[:, 0] - top2_probs[:, 1]  # Larger margin = more confident
-        return margin
 
     def label_prediction(self, pred_probabilities: torch.Tensor) -> torch.Tensor:
         max_probs, argmax_preds = torch.max(pred_probabilities, dim=-1)
