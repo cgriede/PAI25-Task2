@@ -130,11 +130,13 @@ class SWAInferenceHandler(object):
         # TODO(2): optionally add/tweak hyperparameters
         swag_training_epochs: int = 30,
         swag_lr: float = 0.055,
-        swag_update_interval: int = 1,
-        max_rank_deviation_matrix: int = 20,
-        num_bma_samples: int = 30,
         min_lr_factor: float = 0.82,
+        swag_update_interval: int = 1,
+        max_rank_deviation_matrix: int = 30,
+        num_bma_samples: int = 40,
         use_calibration:  bool = True,
+        thresh_quantile: float = 0.35,
+        calibration_temp: float = 1.0
     ):
         """
         :param train_xs: Training images (for storage only)
@@ -156,7 +158,10 @@ class SWAInferenceHandler(object):
         assert (self.max_rank_deviation_matrix >= 2), "max_rank_deviation_matrix must be at least 2"
         self.num_bma_samples = num_bma_samples
         self.min_lr_factor = min_lr_factor
-        self.use_calibration = use_calibration  # Set to False to disable calibration step
+        self.use_calibration = use_calibration  
+        self.thresh_quantile = thresh_quantile
+        self._temperature = calibration_temp
+
 
         # Network used to perform SWAG.
         # Note that all operations in this class modify this network IN-PLACE!
@@ -184,7 +189,6 @@ class SWAInferenceHandler(object):
         # Calibration, prediction, and other attributes
         # TODO(x): create additional attributes, e.g., for calibration
         self._calibration_threshold = None
-        self._temperature = 1.0
         self.current_weights = self._create_weight_copy()
 
     def update_swag_statistics(self) -> None:
@@ -307,16 +311,14 @@ class SWAInferenceHandler(object):
             # Define "clear" as: known label AND no snow AND no cloud
             clear_mask = (labels != -1) & (snow_labels == 0) & (cloud_labels == 0)
             clear_conf = max_probs[clear_mask]
-
             # Set thresh to 10th percentile of confidence on clear samples (conservative rejection)
-            thresh = torch.quantile(clear_conf, 0.3).item()  # ~0.65-0.70 typically
+            thresh = torch.quantile(clear_conf, self.thresh_quantile).item()  # ~0.65-0.70 typically
 
             # No heavy temp scaling (SWAG is already calibrated per paper); light if overconfident
-            self._temperature = 1  # Fixed; or remove if ECE <0.08 on val
             self._calibration_threshold = thresh
 
             # Optional: Print for debug (remove before submit)
-            print(f"Robust calib: thresh={thresh:.4f} (15th %ile on {clear_mask.sum().item()} clear samples)")
+            print(f"Robust calib: thresh={thresh:.4f} ({self.thresh_quantile * 100:.1f} %ile on {clear_mask.sum().item()} clear samples)")
         else:
             self._calibration_threshold = 0.0  # no abstain
 
@@ -419,7 +421,7 @@ class SWAInferenceHandler(object):
                     #print("D.size()", D.size())
                     # Ensure random vector has the same device and dtype as D
                     z_lr = torch.randn(K_actual, device=D.device, dtype=D.dtype)
-                    print("z_lr",z_lr.size())
+                    #print("z_lr",z_lr.size())
                     # Compute low-rank term: (numel, K_actual) @ (K_actual,) -> (numel,)
                     low_rank_prefactor = 1 / np.sqrt(2*(K_actual - 1))
                     lr_product = low_rank_prefactor * (D.t() @ z_lr).view(param.size())
