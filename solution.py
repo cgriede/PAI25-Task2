@@ -134,6 +134,7 @@ class SWAInferenceHandler(object):
         max_rank_deviation_matrix: int = 15,
         num_bma_samples: int = 50,
         min_lr_factor: float = 0.1,
+        use_calibration:  bool = True,
     ):
         """
         :param train_xs: Training images (for storage only)
@@ -155,6 +156,7 @@ class SWAInferenceHandler(object):
         assert (self.max_rank_deviation_matrix >= 2), "max_rank_deviation_matrix must be at least 2"
         self.num_bma_samples = num_bma_samples
         self.min_lr_factor = min_lr_factor
+        self.use_calibration = use_calibration  # Set to False to disable calibration step
 
         # Network used to perform SWAG.
         # Note that all operations in this class modify this network IN-PLACE!
@@ -288,35 +290,44 @@ class SWAInferenceHandler(object):
         plot_loss_curve(training_history, title="SWAG Training Loss Curve", path="swag_training_loss_curve.png")
 
     def run_calibration(self, validation_dataset: torch.utils.data.Dataset) -> None:
-        images, _, _, labels = validation_dataset.tensors
-        best_cost = float('inf')
-        best_temp = 1.0
-        best_thresh = 0.0
-        temps = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]  # Grid search; focus >1 for overconfidence
+                # TODO(2): perform additional calibration if desired.
+        #  Feel free to remove or change the prediction threshold.
+        images, snow_labels, cloud_labels, labels = validation_dataset.tensors
 
-        all_pred_probs = self.predict_probs(images)
-        for temp in temps:
-            self._temperature = temp
-            max_probs, argmax_preds = torch.max(all_pred_probs, dim=-1)
-            threshold_values = [0.0] + list(torch.unique(max_probs).sort()[0].cpu().numpy())
-            costs = []
-            for thresh in threshold_values:
-                preds = torch.where(max_probs <= thresh, torch.tensor(-1, device=max_probs.device), argmax_preds)
-                cost = compute_cost(preds, labels)
-                costs.append(cost.item())
-            min_cost = min(costs)
-            if min_cost < best_cost:
-                best_cost = min_cost
-                best_temp = temp
-                best_thresh = threshold_values[costs.index(min_cost)]
+        assert images.size()       == (140, 3, 60, 60)  # N x C x H x W
+        assert labels.size()       == (140,)
+        assert snow_labels.size()  == (140,)
+        assert cloud_labels.size() == (140,)
+        if self.use_calibration:
+            probs = self.predict_probs(images)  # N x 6
+            max_probs, _ = torch.max(probs, dim=-1)
 
-        self._temperature = best_temp
-        self._calibration_threshold = best_thresh
-        print(f"Calibrated temp: {best_temp}, thresh: {best_thresh}, val cost: {best_cost}")
+            # Define "clear" as: known label AND no snow AND no cloud
+            clear_mask = (labels != -1) & (snow_labels == 0) & (cloud_labels == 0)
+            clear_conf = max_probs[clear_mask]
+
+            # Set thresh to 10th percentile of confidence on clear samples (conservative rejection)
+            thresh = torch.quantile(clear_conf, 0.10).item()  # ~0.65-0.70 typically
+
+            # No heavy temp scaling (SWAG is already calibrated per paper); light if overconfident
+            self._temperature = 1.2  # Fixed; or remove if ECE <0.08 on val
+            self._calibration_threshold = thresh
+
+            # Optional: Print for debug (remove before submit)
+            print(f"Robust calib: thresh={thresh:.4f} (10th %ile on {clear_mask.sum().item()} clear samples)")
+        else:
+            self._calibration_threshold = 0.0  # no abstain
 
     def label_prediction(self, pred_probabilities: torch.Tensor) -> torch.Tensor:
+        # Apply light temp BEFORE softmax if needed (but since probs already soft, scale here)
+        if self._temperature != 1.0:
+            pred_probabilities = pred_probabilities ** (1 / self._temperature)
+            pred_probabilities = pred_probabilities / pred_probabilities.sum(dim=-1, keepdim=True)
+        
         max_probs, argmax_preds = torch.max(pred_probabilities, dim=-1)
-        return torch.where(max_probs <= self._calibration_threshold, torch.tensor(-1, device=argmax_preds.device, dtype=argmax_preds.dtype), argmax_preds)
+        return torch.where(max_probs <= self._calibration_threshold, 
+                        torch.tensor(-1, device=argmax_preds.device, dtype=argmax_preds.dtype), 
+                        argmax_preds)
 
     def predict_probabilities_swag(self, loader: torch.utils.data.DataLoader) -> torch.Tensor:
         """
