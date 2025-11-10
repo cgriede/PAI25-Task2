@@ -59,15 +59,16 @@ class SWAInferenceHandler(object):
         model_dir: pathlib.Path,
         inference_mode: InferenceMode = InferenceMode.SWAG_FULL,
         # TODO(2): optionally add/tweak hyperparameters
-        swag_training_epochs: int = 50,
+        swag_training_epochs: int = 40,
         swag_lr: float = 0.055,
         min_lr_factor: float = 0.75,
         swag_update_interval: int = 1,
-        max_rank_deviation_matrix: int = 40,
+        max_rank_deviation_matrix: int = 30,
         num_bma_samples: int = 50,
         use_calibration:  bool = True,
-        thresh_quantile: float = 0.42,
-        calibration_temp: float = 1.1
+        thresh_quantile: float = 0.5,
+        calibration_temp: float = 1.1,
+        variance_scaling: float = 0.5,
     ):
         """
         :param train_xs: Training images (for storage only)
@@ -92,6 +93,7 @@ class SWAInferenceHandler(object):
         self.use_calibration = use_calibration  
         self.thresh_quantile = thresh_quantile
         self._temperature = calibration_temp
+        self.variance_scaling = variance_scaling
 
 
         # Network used to perform SWAG.
@@ -350,9 +352,9 @@ class SWAInferenceHandler(object):
                     
                     assert lr_product.size() == param.size()
                     
-                    sampled_weight = (mean_weights
-                                    + 1/math.sqrt(2) * std_weights * z_diag
-                                    + lr_product)
+                    sampled_weight = (mean_weights + self.variance_scaling * (
+                                    + 1/math.sqrt(2) * std_weights * z_diag #diag part
+                                    + lr_product)) #low rank part
                 else:
                     # Fallback to diagonal if no deviations are stored
                     sampled_weight = mean_weights + std_weights * z_diag
